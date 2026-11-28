@@ -11,7 +11,9 @@ use App\Models\Course;
 use App\Models\QuestionGroup;
 use App\Models\QuizResult;
 use App\Models\User;
+use App\Support\StudentScope;
 use Illuminate\Database\Eloquent\Collection;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
 
 /** Quizzes, assignments and assessments, their quiz setup and the quiz results behind the report. */
@@ -26,10 +28,12 @@ class AssessmentService
     public function __construct(private readonly AuditLogger $audit, private readonly AssessmentAttachmentService $files, private readonly NotificationService $notifications) {}
 
     /** @return Collection<int, Assessment> */
-    public function list(array $filters = []): Collection
+    /** The library; a mentor sees only the assignments, assessments and quizzes of the courses they teach (an assessment names its course by title). */
+    public function list(array $filters = [], ?User $actor = null): Collection
     {
         return Assessment::query()
             ->with('groups:id')
+            ->when($actor?->role === Role::Mentor, fn ($q) => $q->whereIn('course', DB::table('courses')->whereIn('id', StudentScope::courseIds($actor))->select('title')))
             ->when($filters['type'] ?? null, fn ($q, $type) => $q->where('type', $type))
             ->when($filters['course'] ?? null, fn ($q, $course) => $q->where('course', $course))
             ->when($filters['status'] ?? null, fn ($q, $status) => $q->where('status', $status))

@@ -2,6 +2,8 @@
 
 namespace App\Services;
 
+use App\Enums\Role;
+use App\Support\StudentScope;
 use App\Models\Batch;
 use App\Models\User;
 use Illuminate\Database\Eloquent\Collection;
@@ -12,9 +14,14 @@ class BatchService
     public function __construct(private readonly AuditLogger $audit, private readonly EnrollmentService $enrollments) {}
 
     /** @return Collection<int, Batch> */
-    public function list(): Collection
+    /** Every batch; an institution account gets the batches its own students are in (or that list its institute). */
+    public function list(?User $actor = null): Collection
     {
-        return Batch::query()->with(['colleges:id,name', 'courses:id,title'])->withCount('students')->orderByDesc('start_date')->get();
+        return Batch::query()->with(['colleges:id,name', 'courses:id,title'])->withCount('students')
+            ->when($actor?->role === Role::Institution, fn ($q) => $q->where(fn ($w) => $w
+                ->whereIn('id', StudentScope::collegeBatchIds($actor))
+                ->orWhereHas('colleges', fn ($c) => $c->where('colleges.id', $actor->college_id ?? 0))))
+            ->orderByDesc('start_date')->get();
     }
 
     public function create(User $actor, array $data): Batch

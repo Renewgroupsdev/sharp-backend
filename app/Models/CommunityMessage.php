@@ -8,7 +8,7 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
 class CommunityMessage extends Model
 {
-    protected $fillable = ['group_id', 'user_id', 'body', 'removed_by', 'removed_at'];
+    protected $fillable = ['group_id', 'user_id', 'body', 'removed_by', 'removed_at', 'attachment_path', 'attachment_name', 'attachment_mime', 'attachment_size'];
 
     protected function casts(): array
     {

@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Support\StudentScope;
 use App\Enums\EnrollmentEventType;
 use App\Enums\EnrollmentStatus;
 use App\Enums\Role;
@@ -45,7 +46,8 @@ class EnrollmentService
                 DB::raw('(SELECT COUNT(*) FROM users m WHERE '.self::courseMentorSql().') AS mentors_count'),
             ])
             // A mentor only sees the enrollments of their own batch.
-            ->when($actor->role === Role::Mentor, fn (Builder $q) => $q->where('b.id', $actor->batch_id ?? 0))
+            ->when($actor->role === Role::Mentor, fn (Builder $q) => $q->whereIn('b.id', StudentScope::batchIds($actor)))
+            ->when($actor->role === Role::Institution, fn (Builder $q) => $q->whereIn('b.id', StudentScope::collegeBatchIds($actor)))
             ->orderByRaw("
                 CASE
                     WHEN LOWER(b.status) = 'ongoing' THEN 1
@@ -93,7 +95,8 @@ class EnrollmentService
         $names = json_decode((string) DB::table('courses')->where('id', $enrollment->course_id)->value('mentors'), true);
 
         return [
-            'students' => User::query()->where('batch_id', $enrollment->batch_id)->where('role', Role::Student->value)->orderBy('name')->get($columns),
+            'students' => User::query()->where('batch_id', $enrollment->batch_id)->where('role', Role::Student->value)
+                ->when($actor->role === Role::Institution, fn ($q) => $q->where('college_id', $actor->college_id ?? 0))->orderBy('name')->get($columns),
             'mentors' => User::query()->where('role', Role::Mentor->value)->whereIn('name', is_array($names) ? $names : [])->orderBy('name')->get($columns),
         ];
     }
@@ -157,7 +160,8 @@ class EnrollmentService
             ->join('batches as b', 'b.id', '=', 'ev.batch_id')
             ->leftJoin('users as a', 'a.id', '=', 'ev.actor_id')
             ->select(['ev.id', 'ev.course_id', 'c.title as course', 'ev.batch_id', 'b.name as batch', 'ev.event', 'ev.source', 'ev.note', 'a.name as actor', 'ev.created_at'])
-            ->when($actor->role === Role::Mentor, fn (Builder $q) => $q->where('ev.batch_id', $actor->batch_id ?? 0))
+            ->when($actor->role === Role::Mentor, fn (Builder $q) => $q->whereIn('ev.batch_id', StudentScope::batchIds($actor)))
+            ->when($actor->role === Role::Institution, fn (Builder $q) => $q->whereIn('ev.batch_id', StudentScope::collegeBatchIds($actor)))
             ->when(! empty($filters['course_id']), fn (Builder $q) => $q->where('ev.course_id', $filters['course_id']))
             ->when(! empty($filters['batch_id']), fn (Builder $q) => $q->where('ev.batch_id', $filters['batch_id']))
             ->orderByDesc('ev.id')->limit($limit)->get();

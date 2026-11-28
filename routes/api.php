@@ -50,6 +50,8 @@ Route::prefix('mobile')->name('mobile.')->group(function () {
         Route::get('common-floor', [Mobile\CommonFloorController::class, 'index']);
         Route::post('common-floor', [Mobile\CommonFloorController::class, 'store']);
 
+        // Logs: staff see everything; everyone else their own activity, plus their students' (see the controller).
+        Route::get('audit-logs', [Web\AuditLogController::class, 'index']);
         // Staff only
         Route::middleware('role:super_admin,admin,ob')->group(function () {
             Route::post('common-floor/{message}/{action}', [Mobile\CommonFloorController::class, 'moderate']);
@@ -78,10 +80,13 @@ Route::prefix('web')->name('web.')->group(function () {
     // Anyone can check a certificate number (no sign-in); it returns only the name, course and dates.
     Route::get('verify/{number}', [Web\CertificateController::class, 'verify'])->where('number', '[A-Za-z0-9\-]+')->middleware('throttle:60,1');
     // The QR of a student's course: shows the certificate once the course is completed, otherwise how far it is.
+    // Gallery files open through a signed, expiring link so <img> and <video> can load them without a token.
+    Route::get('gallery/{item}/file', [Web\GalleryController::class, 'file'])->where('item', '[0-9]+')->middleware('signed')->name('gallery.file');
     Route::get('certificate-scan/{token}', [Web\CertificateController::class, 'scan'])->where('token', '[A-Za-z0-9]{20,40}')->middleware('throttle:60,1');
 
     Route::middleware(['auth:sanctum', 'active'])->group(function () {
         Route::get('me', [Web\AuthController::class, 'me']);
+        Route::put('me', [Web\ProfileController::class, 'update']);
 
         // Enum lookups
         Route::get('enums', [Web\EnumController::class, 'index']);
@@ -109,13 +114,17 @@ Route::prefix('web')->name('web.')->group(function () {
         Route::get('course-categories', [Web\CourseCategoryController::class, 'index']);
         Route::get('courses', [Web\CourseController::class, 'index']);
         Route::get('courses/{course:id}', [Web\CourseController::class, 'show'])->where('course', '\d+');
+        // Modules, lessons and their files: staff, and a mentor on the courses they teach (checked in the controller).
+        Route::middleware('role:super_admin,admin,ob,mentor')->group(function () {
+            Route::post('lesson-files', [Web\LessonFileController::class, 'store'])->middleware('throttle:30,1');
+            Route::put('courses/{course:id}/chapters', [Web\CourseController::class, 'chapters'])->where('course', '\d+');
+        });
         Route::middleware('role:super_admin,admin,ob')->group(function () {
             Route::post('course-categories', [Web\CourseCategoryController::class, 'store']);
             Route::put('course-categories/{category:id}', [Web\CourseCategoryController::class, 'update'])->where('category', '\d+');
             Route::delete('course-categories/{category:id}', [Web\CourseCategoryController::class, 'delete'])->where('category', '\d+');
             Route::post('courses', [Web\CourseController::class, 'store']);
             Route::put('courses/{course:id}', [Web\CourseController::class, 'update'])->where('course', '\d+');
-            Route::put('courses/{course:id}/chapters', [Web\CourseController::class, 'chapters'])->where('course', '\d+');
             Route::delete('courses/{course:id}', [Web\CourseController::class, 'delete'])->where('course', '\d+');
             Route::post('courses/{course:id}/restore', [Web\CourseController::class, 'restore'])->withTrashed()->where('course', '\d+');
             Route::delete('courses/{course:id}/purge', [Web\CourseController::class, 'purge'])->withTrashed()->where('course', '\d+');
@@ -131,21 +140,19 @@ Route::prefix('web')->name('web.')->group(function () {
             Route::post('quiz-attempts/{attempt:id}/grade', [Web\QuizAttemptController::class, 'grade'])->where('attempt', '\d+');
             Route::get('submissions',[Web\SubmissionController::class, 'index']);
             Route::get('submissions/{submission:id}', [Web\SubmissionController::class, 'show'])->where('submission', '\d+');
-            Route::post('submissions/{submission:id}/review', [Web\SubmissionController::class, 'review'])->where('submission', '\d+');
-            Route::post('submissions/{submission:id}/grade', [Web\SubmissionController::class, 'grade'])->where('submission', '\d+');
+            // Reviewing and grading are the mentor's (and OB's) job; Admin and Super Admin only read.
+            Route::post('submissions/{submission:id}/review', [Web\SubmissionController::class, 'review'])->where('submission', '\d+')->middleware('role:ob,mentor');
+            Route::post('submissions/{submission:id}/grade', [Web\SubmissionController::class, 'grade'])->where('submission', '\d+')->middleware('role:ob,mentor');
         });
         // Dashboard counts of quiz / assignment / assessment submissions, scoped to the caller (own, batch or all).
         Route::get('submission-stats', [Web\SubmissionController::class, 'stats'])->middleware('role:student,mentor,super_admin,admin,ob');
         // Saving a student's file is for admins only; the student, mentors and OB can only open it in the viewer.
         Route::get('submission-attachments/{attachment:id}/download', [Web\SubmissionController::class, 'download'])->where('attachment', '\d+')->middleware('role:super_admin,admin')->name('submissions.attachments.download');
         Route::get('submission-attachments/{attachment:id}/view', [Web\SubmissionController::class, 'download'])->where('attachment', '\d+')->middleware('role:student,super_admin,admin,ob,mentor')->name('submissions.attachments.view');
-        Route::middleware('role:super_admin,admin')->group(function () {
-            Route::put('submissions/{submission:id}', [Web\SubmissionController::class, 'update'])->where('submission', '\d+');
-            Route::delete('submissions/{submission:id}', [Web\SubmissionController::class, 'destroy'])->where('submission', '\d+');
-        });
         Route::get('assessments', [Web\AssessmentController::class, 'index']);
         Route::get('assessments/{assessment:id}/attachment', [Web\AssessmentController::class, 'attachment'])->where('assessment', '\d+')->middleware('role:student,super_admin,admin,ob,mentor');
-        Route::middleware('role:super_admin,admin,ob')->group(function () {
+        // Question groups, questions and assessments: staff, and a mentor on the courses they teach (checked in the controller).
+        Route::middleware('role:super_admin,admin,ob,mentor')->group(function () {
             Route::post('assessments/{assessment:id}/attachment', [Web\AssessmentController::class, 'uploadAttachment'])->where('assessment', '\d+');
             Route::delete('assessments/{assessment:id}/attachment', [Web\AssessmentController::class, 'deleteAttachment'])->where('assessment', '\d+');
             Route::post('question-groups', [Web\QuestionGroupController::class, 'store']);
@@ -171,15 +178,15 @@ Route::prefix('web')->name('web.')->group(function () {
         });
 
         // Learning management: progress per enrolled student and course (ids travel in the body / query, public ids contain slashes).
-        Route::get('learning', [Web\LearningController::class, 'index'])->middleware('role:super_admin,admin,ob,mentor');
+        Route::get('learning', [Web\LearningController::class, 'index'])->middleware('role:super_admin,admin,ob,mentor,institution');
         Route::get('learning/report', [Web\LearningController::class, 'report'])->middleware('role:super_admin,admin,ob,mentor');
         Route::middleware('role:super_admin,admin,ob')->group(function () {
             Route::put('learning', [Web\LearningController::class, 'save']);
             Route::delete('learning', [Web\LearningController::class, 'reset']);
         });
 
-        // Enrollment management: a course run for a batch. Staff and mentors read (mentors only their own batch); staff write.
-        Route::middleware('role:super_admin,admin,ob,mentor')->group(function () {
+        // Enrollment management: a course run for a batch. Staff, mentors and institutions read (each limited to their own students); staff write.
+        Route::middleware('role:super_admin,admin,ob,mentor,institution')->group(function () {
             Route::get('enrollments', [Web\EnrollmentController::class, 'index']);
             Route::get('enrollments/history', [Web\EnrollmentController::class, 'history']);
             Route::get('enrollments/{enrollment}/members', [Web\EnrollmentController::class, 'members'])->where('enrollment', '\d+');
@@ -198,6 +205,10 @@ Route::prefix('web')->name('web.')->group(function () {
             Route::post('enrollments/{enrollment}/certificates', [Web\EnrollmentController::class, 'certificates'])->where('enrollment', '\d+');
             Route::delete('enrollments/{enrollment}', [Web\EnrollmentController::class, 'destroy'])->where('enrollment', '\d+');
             Route::post('certificates', [Web\CertificateController::class, 'store']);
+            Route::get('certificate-templates', [Web\CertificateTemplateController::class, 'index']);
+            Route::post('certificate-templates', [Web\CertificateTemplateController::class, 'store']);
+            Route::put('certificate-templates/{template:id}', [Web\CertificateTemplateController::class, 'update'])->where('template', '\d+');
+            Route::delete('certificate-templates/{template:id}', [Web\CertificateTemplateController::class, 'destroy'])->where('template', '\d+');
             Route::put('certificates/{certificate:id}', [Web\CertificateController::class, 'update'])->where('certificate', '\d+');
             Route::delete('certificates/{certificate:id}', [Web\CertificateController::class, 'delete'])->where('certificate', '\d+');
             Route::post('certificates/{certificate:id}/cancel', [Web\CertificateController::class, 'cancel'])->where('certificate', '\d+');
@@ -210,6 +221,17 @@ Route::prefix('web')->name('web.')->group(function () {
 
         // The signed-in user's own dashboard (figures scoped to their role).
         Route::get('my/dashboard', Web\RoleDashboardController::class);
+
+        // Roles & Permissions: every signed-in role reads what it may use; Super Admin and Admin assign it.
+        Route::get('permissions/mine', [Web\PermissionController::class, 'mine']);
+        // Mentor feedback on a student in a course: readable by the student and by those who oversee them; staff and mentors write it.
+        Route::get('course-feedback', [Web\CourseFeedbackController::class, 'index']);
+        Route::post('course-feedback', [Web\CourseFeedbackController::class, 'store'])->middleware('role:super_admin,admin,ob,mentor');
+        Route::middleware('role:super_admin,admin')->group(function () {
+            Route::get('permissions/tree', [Web\PermissionController::class, 'tree']);
+            Route::put('permissions/tree', [Web\PermissionController::class, 'save']);
+            Route::post('permissions/reset', [Web\PermissionController::class, 'reset']);
+        });
 
         // The signed-in user's own notification inbox.
         Route::get('notifications', [Web\NotificationController::class, 'index']);
@@ -237,6 +259,7 @@ Route::prefix('web')->name('web.')->group(function () {
             Route::post('assessments/{assessment}/submit', [Web\MyAssessmentController::class, 'submit'])->where('assessment', '\d+');
             Route::post('assessments/{assessment}/submissions', [Web\MyAssessmentController::class, 'submitAssignment'])->where('assessment', '\d+');
             Route::get('assessments/{assessment}/submissions', [Web\MyAssessmentController::class, 'assignmentSubmissions'])->where('assessment', '\d+');
+            Route::delete('assessments/{assessment}/submissions/{submission}', [Web\MyAssessmentController::class, 'deleteSubmission'])->where(['assessment' => '\d+', 'submission' => '\d+']);
             Route::get('assessments/{assessment}/review', [Web\MyAssessmentController::class, 'review'])->where('assessment', '\d+');
 
             Route::get('courses', [Web\MyLearningController::class, 'index']);
@@ -255,6 +278,9 @@ Route::prefix('web')->name('web.')->group(function () {
             Route::post('suspend', [Web\UserController::class, 'suspend']);
             Route::post('activate', [Web\UserController::class, 'activate']);
             Route::post('reset-password', [Web\UserController::class, 'resetPassword']);
+            Route::get('courses', [Web\UserController::class, 'courses'])->middleware('role:super_admin,admin,ob');
+            Route::post('courses', [Web\UserController::class, 'enroll'])->middleware('role:super_admin,admin,ob');
+            Route::post('courses/remove', [Web\UserController::class, 'unenroll'])->middleware('role:super_admin,admin,ob');
         });
         Route::get('users/{user:public_id}', [Web\UserController::class, 'show'])->where('user', '.+');
         Route::put('users/{user:public_id}', [Web\UserController::class, 'update'])->where('user', '.+');
@@ -262,7 +288,8 @@ Route::prefix('web')->name('web.')->group(function () {
 
         // Attendance
         Route::get('attendance', [Web\AttendanceController::class, 'index']);
-        Route::get('attendance/list', [Web\AttendanceController::class, 'list'])->middleware('role:super_admin,admin,ob,mentor');
+        Route::get('attendance/summary', [Web\AttendanceController::class, 'summary']);
+        Route::get('attendance/list', [Web\AttendanceController::class, 'list'])->middleware('role:super_admin,admin,ob,mentor,institution');
         Route::post('attendance', [Web\AttendanceController::class, 'store'])->middleware('role:super_admin,admin,ob,mentor');
         Route::post('attendance/bulk', [Web\AttendanceController::class, 'bulk'])->middleware('role:super_admin,admin,ob,mentor');
 
@@ -271,6 +298,14 @@ Route::prefix('web')->name('web.')->group(function () {
         Route::post('attendance-requests', [Web\AttendanceRequestController::class, 'store'])->middleware('role:student');
         Route::post('attendance-requests/{attendanceRequest:id}/mark', [Web\AttendanceRequestController::class, 'mark'])
             ->where('attendanceRequest', '\d+')->middleware('role:super_admin,admin,ob,mentor');
+
+        // Gallery: everyone views; staff add, edit and remove.
+        Route::get('gallery', [Web\GalleryController::class, 'index']);
+        Route::middleware('role:super_admin,admin,ob')->group(function () {
+            Route::post('gallery', [Web\GalleryController::class, 'store']);
+            Route::put('gallery/{item}', [Web\GalleryController::class, 'update'])->where('item', '[0-9]+');
+        });
+        Route::delete('gallery/{item}', [Web\GalleryController::class, 'destroy'])->where('item', '[0-9]+')->middleware('role:super_admin,admin');
 
         // Common Floor
         Route::get('common-floor', [Web\CommonFloorController::class, 'index']);
@@ -282,6 +317,7 @@ Route::prefix('web')->name('web.')->group(function () {
             Route::get('groups', [Web\CommunityController::class, 'index']);
             Route::get('groups/{group}', [Web\CommunityController::class, 'show'])->where('group', '\d+');
             Route::get('groups/{group}/messages', [Web\CommunityController::class, 'messages'])->where('group', '\d+');
+            Route::get('groups/{group}/messages/{message}/file', [Web\CommunityController::class, 'attachment'])->where(['group' => '\d+', 'message' => '\d+']);
             Route::post('groups/{group}/messages', [Web\CommunityController::class, 'post'])->where('group', '\d+');
             Route::post('groups/{group}/messages/{message}/pin', [Web\CommunityController::class, 'pinMessage'])->where(['group' => '\d+', 'message' => '\d+']);
             Route::post('groups/{group}/read', [Web\CommunityController::class, 'read'])->where('group', '\d+');
@@ -303,10 +339,11 @@ Route::prefix('web')->name('web.')->group(function () {
             });
         });
 
+        // Logs: staff see everything; everyone else their own activity, plus their students' (see the controller).
+        Route::get('audit-logs', [Web\AuditLogController::class, 'index']);
         // Staff only
         Route::middleware('role:super_admin,admin,ob')->group(function () {
             Route::post('common-floor/{message}/{action}', [Web\CommonFloorController::class, 'moderate']);
-            Route::get('audit-logs', [Web\AuditLogController::class, 'index']);
             Route::get('dashboard', Web\DashboardController::class);
             Route::get('dashboard/activity', Web\ActivityReportController::class);
             Route::get('dashboard/programme', Web\ProgrammeOverviewController::class);

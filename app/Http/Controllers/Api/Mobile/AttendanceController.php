@@ -7,6 +7,7 @@ use App\Http\Controllers\Api\ApiController;
 use App\Enums\AttendanceStatus;
 use App\Enums\Role;
 use App\Http\Requests\MarkAttendanceRequest;
+use App\Support\StudentScope;
 use App\Http\Resources\AttendanceResource;
 use App\Http\Resources\UserResource;
 use App\Models\User;
@@ -47,6 +48,7 @@ class AttendanceController extends ApiController
     {
         $student = User::students()->where('public_id', $request->validated('student_id'))->first()
             ?? abort(404, 'Student not found.');
+        abort_if($request->user()->role === Role::Mentor && ! StudentScope::ownsBatch($request->user(), $student->batch_id), 403, 'You can only mark your assigned students.');
 
         $message = $this->attendance->mark(
             $request->user(),

@@ -80,19 +80,26 @@ class CommunityMessageService
         return $this->pinned($actor, $group);
     }
 
-    public function post(User $author, CommunityGroup $group, string $body): array
+    public function post(User $author, CommunityGroup $group, string $body, ?\Illuminate\Http\UploadedFile $file = null): array
     {
         abort_unless($this->access->canView($author, $group), 403, 'You are not a member of this group.');
         if (! $this->access->canPost($author, $group)) {
             throw ValidationException::withMessages(['body' => $this->whyNot($group)]);
         }
 
+        $attached = $file ? [
+            'attachment_path' => $file->store('chat/'.$group->id, config('filesystems.assessment_disk', 'local')),
+            'attachment_name' => Str::limit($file->getClientOriginalName(), 200, ''),
+            'attachment_mime' => $file->getMimeType(),
+            'attachment_size' => $file->getSize(),
+        ] : [];
         $message = $group->usesFloorMessages()
-            ? CommonFloorMessage::create(['user_id' => $author->id, 'message' => $body])
-            : $group->messages()->create(['user_id' => $author->id, 'body' => $body]);
+            ? CommonFloorMessage::create(['user_id' => $author->id, 'message' => $body] + $attached)
+            : $group->messages()->create(['user_id' => $author->id, 'body' => $body] + $attached);
 
         $shaped = $this->shape($group, $message->refresh()->load(self::AUTHOR));
         $this->realtime->posted($group, $shaped);
+        $this->notifyMentions($author, $group, $body);
         if ($group->isAnnouncement()) {
             $this->notifications->notify('announcement_posted', $this->access->members($group)->where('users.id', '<>', $author->id)->pluck('users.id')->all(), [
                 'group' => $this->title($group), 'author' => $author->name, 'message' => Str::limit($body, 140),
@@ -100,6 +107,30 @@ class CommunityMessageService
         }
 
         return $shaped;
+    }
+
+    /** Tells each member named with @ in the message. */
+    private function notifyMentions(User $author, CommunityGroup $group, string $body): void
+    {
+        if (! str_contains($body, '@')) {
+            return;
+        }
+        $hit = $this->access->members($group)->where('users.id', '<>', $author->id)->get(['users.id', 'users.name'])
+            ->filter(fn ($u) => stripos($body, '@'.$u->name) !== false)->pluck('id')->all();
+        if ($hit) {
+            $this->notifications->notify('chat_mention', $hit, ['group' => $this->title($group), 'author' => $author->name, 'message' => Str::limit($body, 140)], ['url' => '/app/community', 'group_id' => $group->id]);
+        }
+    }
+
+    /** Streams a message's file to someone who can read the group. */
+    public function attachment(User $viewer, CommunityGroup $group, int $messageId)
+    {
+        abort_unless($this->access->canView($viewer, $group), 403, 'You are not a member of this group.');
+        $m = $group->usesFloorMessages() ? CommonFloorMessage::visible()->findOrFail($messageId) : $group->messages()->visible()->findOrFail($messageId);
+        $disk = config('filesystems.assessment_disk', 'local');
+        abort_unless($m->attachment_path && \Illuminate\Support\Facades\Storage::disk($disk)->exists($m->attachment_path), 404, 'File not found.');
+
+        return \Illuminate\Support\Facades\Storage::disk($disk)->response($m->attachment_path, $m->attachment_name, ['Content-Type' => $m->attachment_mime ?: 'application/octet-stream', 'X-Content-Type-Options' => 'nosniff']);
     }
 
     /** Staff take a message out of the conversation. It is hidden, not deleted, and the removal is logged. */
@@ -147,6 +178,7 @@ class CommunityMessageService
             'body' => $m instanceof CommonFloorMessage ? $m->message : $m->body,
             'at' => $m->created_at,
             'author' => $author ?? $m->author,
+            'attachment' => $m->attachment_path ? ['name' => $m->attachment_name, 'mime' => $m->attachment_mime, 'size' => $m->attachment_size] : null,
         ];
     }
 

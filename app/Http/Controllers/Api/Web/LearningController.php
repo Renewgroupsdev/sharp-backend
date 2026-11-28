@@ -26,7 +26,7 @@ class LearningController extends ApiController
             'status' => ['nullable', Rule::enum(LearningStatus::class)],
         ]);
 
-        return $this->ok(['records' => LearningResource::collection($this->learning->list($filters))]);
+        return $this->ok(['records' => LearningResource::collection($this->learning->list($filters, $request->user()))]);
     }
 
     /** Per-module breakdown from the student's real lesson completions. */

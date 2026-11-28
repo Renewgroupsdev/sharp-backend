@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Enums\Role;
 use App\Models\College;
 use App\Models\User;
 use Illuminate\Database\Eloquent\Collection;
@@ -15,9 +16,12 @@ class CollegeService
     public function __construct(private readonly AuditLogger $audit) {}
 
     /** @return Collection<int, College> */
-    public function list(): Collection
+    /** Every institute; an institution account gets only its own. */
+    public function list(?User $actor = null): Collection
     {
-        return College::query()->withCount('students')->orderBy('name')->get();
+        return College::query()->withCount('students')
+            ->when($actor?->role === Role::Institution, fn ($q) => $q->where('id', $actor->college_id ?? 0))
+            ->orderBy('name')->get();
     }
 
     public function create(User $actor, array $data): College

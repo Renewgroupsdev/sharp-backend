@@ -88,9 +88,12 @@ class AnalyticsService
     private function kpis(): array
     {
         $students = DB::table('users')->where('role', Role::Student->value);
-        $attended = fn (Carbon $a, Carbon $b) => $this->attendanceRate($a, $b);
-        $rate = $attended($this->from, $this->to->copy()->addSecond());
-        $before = $attended($this->from->copy()->subMonths($this->months), $this->from);
+        // Course attendance: each student's days attended out of the working days of their course (batch) dates, averaged.
+        $summary = new AttendanceSummary();
+        $ids = (clone $students)->pluck('id');
+        $average = fn (?Carbon $asOf) => ($r = collect($summary->ratesFor($ids, $asOf))) ->isEmpty() ? 0 : (int) round($r->avg());
+        $rate = $average($this->to);
+        $before = $average($this->from);
 
         return [
             'students' => (clone $students)->count(),
@@ -185,23 +188,15 @@ class AnalyticsService
             $weeks[] = ['label' => $first->format('j M').' – '.$first->copy()->addDays(6)->format('j M'), 'start' => $first->toDateString(), 'cells' => $cells];
         }
 
-        // Stacked bar: present / late (manual) / absent per batch, over the selected range.
-        $batches = DB::table('attendance')
-            ->join('users', 'users.id', '=', 'attendance.student_id')
-            ->join('batches', 'batches.id', '=', 'users.batch_id')
-            ->where('attendance.att_date', '>=', $this->from->toDateString())
-            ->selectRaw('batches.name AS name, attendance.status AS status, COUNT(*) AS n')
-            ->groupBy('batches.name', 'attendance.status')->get()->groupBy('name')
-            ->map(function ($rows, $name) {
-                $by = $rows->pluck('n', 'status');
+        // Course attendance per batch: the average of its students' days attended out of the working days of the course dates.
+        $students = DB::table('users')->where('role', Role::Student->value)->whereNotNull('batch_id')->get(['id', 'batch_id']);
+        $rates = (new AttendanceSummary())->ratesFor($students->pluck('id'));
+        $names = DB::table('batches')->pluck('name', 'id');
+        $batches = $students->groupBy('batch_id')->map(function ($group, $batchId) use ($rates, $names) {
+            $values = $group->map(fn ($s) => $rates[$s->id] ?? null)->filter(fn ($v) => $v !== null);
 
-                return [
-                    'name' => (string) $name,
-                    'present' => (int) ($by[AttendanceStatus::Present->value] ?? 0),
-                    'late' => (int) ($by[AttendanceStatus::Manual->value] ?? 0),
-                    'absent' => (int) ($by[AttendanceStatus::Absent->value] ?? 0),
-                ];
-            })->sortByDesc(fn ($b) => $b['present'] + $b['late'] + $b['absent'])->take(6)->values()->all();
+            return ['name' => (string) ($names[$batchId] ?? "Batch {$batchId}"), 'rate' => $values->isEmpty() ? 0 : (int) round($values->avg()), 'students' => $group->count()];
+        })->sortByDesc('students')->take(6)->values()->all();
 
         return ['heatmap' => $weeks, 'batches' => $batches];
     }

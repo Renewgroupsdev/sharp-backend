@@ -12,6 +12,7 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\SoftDeletes;
+use Illuminate\Support\Facades\DB;
 
 class Course extends Model
 {
@@ -53,6 +54,20 @@ class Course extends Model
     public function batches(): BelongsToMany
     {
         return $this->belongsToMany(Batch::class, 'batch_course')->withTimestamps();
+    }
+
+    /** Students enrolled in this course one by one (as well as through a batch). */
+    public function students(): BelongsToMany
+    {
+        return $this->belongsToMany(User::class, 'student_course')->withTimestamps();
+    }
+
+    /** Courses a student takes: those of their batch plus any given to them directly. */
+    public function scopeForStudent($query, User $student)
+    {
+        return $query->where(fn ($w) => $w
+            ->whereIn('courses.id', DB::table('batch_course')->where('batch_id', $student->batch_id ?? 0)->select('course_id'))
+            ->orWhereIn('courses.id', DB::table('student_course')->where('user_id', $student->id)->select('course_id')));
     }
 
     public function chapters(): HasMany

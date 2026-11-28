@@ -48,6 +48,14 @@ class MyAssessmentController extends ApiController
         return $this->ok(['submission' => new SubmissionResource($submission)], 201);
     }
 
+    public function deleteSubmission(Request $request, int $assessment, int $submission): JsonResponse
+    {
+        $model = \App\Models\AssessmentSubmission::query()->where('assessment_id', $assessment)->findOrFail($submission);
+        $this->submissions->removeOwn($request->user(), $model);
+
+        return $this->ok(['message' => 'Submission deleted.']);
+    }
+
     public function assignmentSubmissions(Request $request, int $assessment): JsonResponse
     {
         $model = Assessment::query()->findOrFail($assessment);

@@ -6,6 +6,9 @@ use App\Enums\AttendanceStatus;
 use App\Http\Controllers\Api\Mobile\AttendanceController as MobileAttendanceController;
 use App\Http\Requests\BulkMarkAttendanceRequest;
 use App\Http\Resources\AttendanceListResource;
+use App\Models\User;
+use App\Services\AttendanceSummary;
+use App\Support\StudentScope;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Validation\Rule;
@@ -20,6 +23,17 @@ class AttendanceController extends MobileAttendanceController
         $result = $this->attendance->markMany($request->user(), $data['student_ids'], AttendanceStatus::from($data['status']), $data['reason'] ?? null, $data['date'] ?? null);
 
         return $this->ok(['marked' => $result['marked'], 'message' => "{$result['marked']} students marked ".strtolower($data['status']).'.']);
+    }
+
+    /** Month-by-month and per-course attendance percentages: your own, or a student's you may see (`?student_id=` public id). */
+    public function summary(Request $request, AttendanceSummary $summary): JsonResponse
+    {
+        $actor = $request->user();
+        $publicId = (string) $request->query('student_id', '');
+        $student = $publicId === '' ? $actor : User::students()->where('public_id', $publicId)->firstOrFail();
+        abort_unless($student->id === $actor->id || StudentScope::allows($actor, $student), 403, 'You can only view your own students.');
+
+        return $this->ok($summary->for($student));
     }
 
     /** Attendance of many students (staff and mentors; a mentor only sees their own batch). Defaults to the last 90 days. */

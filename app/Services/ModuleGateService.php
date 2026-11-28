@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Support\StudentScope;
 use App\Enums\AssessmentStatus;
 use App\Enums\AssessmentType;
 use App\Enums\CourseStatus;
@@ -47,18 +48,25 @@ class ModuleGateService
         $lessonIds = $chapters->flatMap(fn (CourseChapter $c) => $this->visibleLessons($c)->pluck('id'));
         $done = LessonProgress::where('user_id', $student->id)->whereIn('course_lesson_id', $lessonIds)->whereNotNull('completed_at')->pluck('course_lesson_id')->flip();
 
-        $quizzes = Assessment::where('course', $course->title)->where('type', AssessmentType::Quiz->value)
-            ->where('status', AssessmentStatus::Published->value)->get(['id', 'title', 'module', 'min_percent']);
+        // Quizzes and question-based assessments both sit in their module and both have to be passed.
+        $quizzes = Assessment::where('course', $course->title)->whereIn('type', [AssessmentType::Quiz->value, AssessmentType::Assessment->value])
+            ->where('status', AssessmentStatus::Published->value)->get(['id', 'type', 'title', 'module', 'topic', 'min_percent']);
         $results = QuizResult::where('student_id', $student->id)->whereIn('assessment_id', $quizzes->pluck('id'))->get()->keyBy('assessment_id');
         $unlocked = ModuleUnlock::where('student_id', $student->id)->whereIn('course_chapter_id', $chapters->pluck('id'))->pluck('course_chapter_id')->flip();
 
         $out = [];
         foreach ($chapters->values() as $i => $chapter) {
             $lessons = $this->visibleLessons($chapter);
-            $mine = $quizzes->where('module', $chapter->name)->map(function (Assessment $a) use ($results) {
+            $mine = $quizzes->where('module', $chapter->name)->map(function (Assessment $a) use ($results, $lessons, $done, $chapter) {
                 $best = $results->get($a->id)?->result_percent;
+                // Opens after its own lesson when the topic names one, otherwise after every lesson of the module.
+                $topic = trim((string) $a->topic);
+                $own = ($topic !== '' && strcasecmp($topic, 'All topics') !== 0) ? $lessons->first(fn ($l) => strcasecmp(trim($l->name), $topic) === 0) : null;
+                $need = $own ? collect([$own]) : $lessons;
+                $available = $need->every(fn ($l) => $done->has($l->id));
+                $reason = $available ? null : ($own ? 'Complete the lesson "'.$own->name.'" first' : 'Complete all lessons of "'.$chapter->name.'" first');
 
-                return ['id' => $a->id, 'title' => $a->title, 'best_percent' => $best, 'min_percent' => $a->min_percent, 'passed' => $best !== null && $best >= $a->min_percent];
+                return ['id' => $a->id, 'type' => $a->type instanceof AssessmentType ? $a->type->value : (string) $a->type, 'title' => $a->title, 'best_percent' => $best, 'min_percent' => $a->min_percent, 'passed' => $best !== null && $best >= $a->min_percent, 'available' => $available, 'reason' => $reason];
             })->values()->all();
 
             $doneCount = $lessons->filter(fn ($l) => $done->has($l->id))->count();
@@ -119,7 +127,7 @@ class ModuleGateService
             $needs[] = 'complete all its lessons';
         }
         if (collect($previous['quizzes'])->contains('passed', false)) {
-            $needs[] = 'pass its quiz';
+            $needs[] = 'pass its quiz or assessment';
         }
 
         return "Finish “{$previous['name']}” first: ".(implode(' and ', $needs) ?: 'complete it').'. A mentor can also unlock it.';
@@ -144,7 +152,7 @@ class ModuleGateService
     }
 
     /**
-     * Which of the given assessments sit in a locked module, with the reason.
+     * Which of the given quizzes and assessments sit in a locked module, with the reason.
      *
      * @param  Collection<int, Assessment>  $assessments
      * @return array<int, string> assessment id => reason
@@ -152,7 +160,7 @@ class ModuleGateService
     public function lockedQuizzes(User $student, Collection $assessments): array
     {
         $locked = [];
-        foreach ($assessments->where('type', AssessmentType::Quiz)->groupBy('course') as $title => $group) {
+        foreach ($assessments->filter(fn (Assessment $a) => in_array($a->type, [AssessmentType::Quiz, AssessmentType::Assessment], true))->groupBy('course') as $title => $group) {
             $course = Course::where('title', $title)->where('status', CourseStatus::Published->value)->first();
             if (! $course) {
                 continue;
@@ -162,6 +170,11 @@ class ModuleGateService
                 $row = $modules->get($quiz->module);
                 if ($row && $row['locked']) {
                     $locked[$quiz->id] = $row['reason'];
+                } elseif ($row) {
+                    $q = collect($row['quizzes'])->firstWhere('id', $quiz->id);
+                    if ($q && $q['available'] === false) {
+                        $locked[$quiz->id] = $q['reason'];
+                    }
                 }
             }
         }
@@ -210,7 +223,7 @@ class ModuleGateService
     public function list(User $actor, array $filters = []): Collection
     {
         return ModuleUnlock::query()->with(['student:id,public_id,name,batch_id', 'chapter:id,course_id,name', 'chapter.course:id,title', 'unlocker:id,name'])
-            ->when($actor->role === Role::Mentor, fn (Builder $q) => $q->whereHas('student', fn (Builder $s) => $s->where('batch_id', $actor->batch_id ?? 0)))
+            ->when($actor->role === Role::Mentor, fn (Builder $q) => $q->whereHas('student', fn (Builder $s) => $s->whereIn('batch_id', StudentScope::batchIds($actor))))
             ->when(! empty($filters['student_id']), fn (Builder $q) => $q->whereHas('student', fn (Builder $s) => $s->where('public_id', $filters['student_id'])))
             ->when(! empty($filters['course_id']), fn (Builder $q) => $q->whereHas('chapter', fn (Builder $c) => $c->where('course_id', $filters['course_id'])))
             ->orderByDesc('id')->limit(500)->get();
@@ -227,6 +240,7 @@ class ModuleGateService
 
         return Course::query()->where('status', CourseStatus::Published->value)
             ->whereHas('batches', fn (Builder $b) => $b->where('batches.id', $student->batch_id ?? 0))
+            ->when($actor->role === Role::Mentor, fn (Builder $q) => $q->whereIn('id', StudentScope::courseIds($actor)))
             ->orderBy('title')->get()
             ->map(fn (Course $c) => ['course' => ['id' => $c->id, 'title' => $c->title], 'modules' => $this->modules($student, $c)])
             ->values()->all();
@@ -234,7 +248,7 @@ class ModuleGateService
 
     private function assertCanManage(User $actor, User $student): void
     {
-        abort_if($actor->role === Role::Mentor && $student->batch_id !== $actor->batch_id, 403, 'You can only manage students of your own batch.');
+        abort_if($actor->role === Role::Mentor && ! StudentScope::ownsBatch($actor, $student->batch_id), 403, 'You can only manage your assigned students.');
     }
 
     private function loaded(ModuleUnlock $unlock): ModuleUnlock

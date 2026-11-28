@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Support\StudentScope;
 use App\Enums\CertificateStatus;
 use App\Enums\Role;
 use App\Models\Certificate;
@@ -48,7 +49,8 @@ class CertificateService
     public function list(User $actor, array $filters = []): Collection
     {
         $rows = Certificate::query()->with(self::WITH)
-            ->when($actor->role === Role::Mentor, fn (Builder $q) => $q->whereHas('student', fn (Builder $s) => $s->where('batch_id', $actor->batch_id ?? 0)))
+            ->when($actor->role === Role::Mentor, fn (Builder $q) => $q->whereHas('student', fn (Builder $s) => $s->whereIn('batch_id', StudentScope::batchIds($actor))))
+            ->when($actor->role === Role::Institution, fn (Builder $q) => $q->whereHas('student', fn (Builder $s) => $s->where('college_id', $actor->college_id ?? 0)))
             ->when(! empty($filters['course_id']), fn (Builder $q) => $q->where('course_id', $filters['course_id']))
             ->when(! empty($filters['batch_id']), fn (Builder $q) => $q->whereHas('student', fn (Builder $s) => $s->where('batch_id', $filters['batch_id'])))
             ->when(! empty($filters['status']), fn (Builder $q) => $q->where('status', $filters['status']))
@@ -68,7 +70,7 @@ class CertificateService
     }
 
     /** Staff create a Pending certificate for a student who has not finished the course by the usual route. */
-    public function create(User $actor, string $studentPublicId, int $courseId): Certificate
+    public function create(User $actor, string $studentPublicId, int $courseId, ?int $templateId = null): Certificate
     {
         $student = User::query()->where('public_id', $studentPublicId)->where('role', Role::Student->value)->firstOrFail();
         $course = Course::query()->findOrFail($courseId);
@@ -81,7 +83,13 @@ class CertificateService
             $certificate->update(['status' => CertificateStatus::Pending, 'mentor_decision' => null, 'mentor_note' => null]); // a rejected one is reopened
         }
 
-        $this->audit->record($actor, 'Created certificate', $student->public_id, $course->title);
+        // A template is copied onto the certificate, so editing or deleting the template later never changes it.
+        $template = $templateId ? \App\Models\CertificateTemplate::query()->find($templateId) : null;
+        if ($template) {
+            $certificate->update(['design_override' => $template->design]);
+        }
+
+        $this->audit->record($actor, 'Created certificate', $student->public_id, $course->title.($template ? " · template {$template->name}" : ''));
 
         return $this->one($certificate);
     }
@@ -90,7 +98,8 @@ class CertificateService
     public function review(User $actor, Certificate $certificate, string $decision, ?string $note): Certificate
     {
         $certificate->loadMissing('student');
-        abort_if($actor->role === Role::Mentor && $certificate->student->batch_id !== $actor->batch_id, 403, 'You can only review students of your own batch.');
+        abort_if($actor->role === Role::Institution, 403, 'An institute can view certificates but not review them.');
+        abort_if($actor->role === Role::Mentor && ! StudentScope::ownsBatch($actor, $certificate->student->batch_id), 403, 'You can only review your assigned students.');
         if ($certificate->status !== CertificateStatus::Pending) {
             throw ValidationException::withMessages(['status' => 'Only a certificate that is still pending can be reviewed.']);
         }
@@ -211,7 +220,7 @@ class CertificateService
 
     /**
      * Attendance and quiz score of each certificate's student against the minimums, computed in two queries.
-     * A student with no attendance records or no quiz results is not held back by that measure.
+     * A student with no course dates or no quiz results is not held back by that measure.
      *
      * @param  Collection<int, Certificate>  $certificates
      * @return array<int, array{attendance: ?int, score: ?int, min_attendance: int, min_score: int, ok: bool}>
@@ -221,8 +230,8 @@ class CertificateService
         $settings ??= CertificateSetting::current();
         $students = $certificates->pluck('user_id')->unique()->all();
 
-        $attendance = DB::table('attendance')->whereIn('student_id', $students)->groupBy('student_id')
-            ->selectRaw("student_id, ROUND(AVG(CASE WHEN status <> 'Absent' THEN 100 ELSE 0 END)) AS pct")->pluck('pct', 'student_id');
+        // Course attendance: days attended out of the working days between the course (batch) start and end dates.
+        $attendance = collect((new AttendanceSummary())->ratesFor($students));
         $scores = DB::table('quiz_results as q')->join('assessments as a', 'a.id', '=', 'q.assessment_id')
             ->whereIn('q.student_id', $students)->groupBy('q.student_id', 'a.course')
             ->selectRaw('q.student_id, a.course, ROUND(AVG(q.result_percent)) AS pct')->get()
@@ -303,7 +312,7 @@ class CertificateService
         if (array_key_exists('design', $data)) {
             $base = $settings->design();
             $changed = collect($data['design'] ?? [])
-                ->only(['template', 'type', 'title', 'body', 'signature_name', 'signature_role', 'signature_image', 'show_profile', 'show_qr'])
+                ->only(['template', 'type', 'title', 'body', 'accent', 'signature_name', 'signature_role', 'signature_image', 'show_profile', 'show_qr', 'show_logo', 'logo_position', 'logo_image', 'logos'])
                 ->map(fn ($v) => $v === '' ? null : $v)
                 ->filter(fn ($v, $k) => $v !== ($base[$k] ?? null))
                 ->all();

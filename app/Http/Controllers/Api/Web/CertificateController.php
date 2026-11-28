@@ -67,9 +67,13 @@ class CertificateController extends ApiController
 
     public function store(Request $request): JsonResponse
     {
-        $data = $request->validate(['student_id' => ['required', 'string', 'max:40'], 'course_id' => ['required', 'integer', 'exists:courses,id']]);
+        $data = $request->validate([
+            'student_id' => ['required', 'string', 'max:40'],
+            'course_id' => ['required', 'integer', 'exists:courses,id'],
+            'template_id' => ['nullable', 'integer', 'exists:certificate_templates,id'],
+        ]);
 
-        return $this->ok(['certificate' => new CertificateResource($this->certificates->create($request->user(), $data['student_id'], (int) $data['course_id']))], 201);
+        return $this->ok(['certificate' => new CertificateResource($this->certificates->create($request->user(), $data['student_id'], (int) $data['course_id'], isset($data['template_id']) ? (int) $data['template_id'] : null))], 201);
     }
 
     /** Edit the details of a certificate that is not issued yet. */

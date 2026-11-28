@@ -8,7 +8,7 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
 class CommonFloorMessage extends Model
 {
-    protected $fillable = ['user_id', 'message', 'flagged', 'muted'];
+    protected $fillable = ['user_id', 'message', 'flagged', 'muted', 'attachment_path', 'attachment_name', 'attachment_mime', 'attachment_size'];
 
     protected function casts(): array
     {

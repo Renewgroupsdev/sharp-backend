@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Support\StudentScope;
 use App\Enums\AttendanceStatus;
 use App\Enums\Role;
 use App\Models\Attendance;
@@ -47,7 +48,8 @@ class AttendanceService
         return Attendance::query()
             ->with(['student:id,public_id,name,org,batch_id', 'student.batch:id,name', 'marker:id,name'])
             ->whereHas('student', fn (Builder $s) => $s
-                ->when($actor->role === Role::Mentor, fn (Builder $q) => $q->where('batch_id', $actor->batch_id ?? 0))
+                ->when($actor->role === Role::Mentor, fn (Builder $q) => $q->whereIn('batch_id', StudentScope::batchIds($actor)))
+                ->when($actor->role === Role::Institution, fn (Builder $q) => $q->where('college_id', $actor->college_id ?? 0))
                 ->when(! empty($filters['batch_id']), fn (Builder $q) => $q->where('batch_id', $filters['batch_id']))
                 ->when(! empty($filters['college_id']), fn (Builder $q) => $q->where('college_id', $filters['college_id']))
                 ->when(! empty($filters['student_id']), fn (Builder $q) => $q->where('public_id', $filters['student_id'])))
@@ -109,8 +111,8 @@ class AttendanceService
             abort(404, 'Student not found: '.implode(', ', array_slice($missing, 0, 5)));
         }
         if ($marker->role === Role::Mentor) {
-            $outside = $students->first(fn (User $s) => $s->batch_id !== $marker->batch_id);
-            abort_if($outside, 403, "You can only mark students of your own batch ({$outside?->name} is not).");
+            $outside = $students->first(fn (User $s) => ! StudentScope::ownsBatch($marker, $s->batch_id));
+            abort_if($outside, 403, "You can only mark your assigned students ({$outside?->name} is not).");
         }
 
         DB::transaction(fn () => $students->each(fn (User $s) => $this->mark($marker, $s, $status, $reason, $date, audit: false)));

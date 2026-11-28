@@ -135,7 +135,12 @@ class CommunityController extends ApiController
 
     public function post(PostCommunityMessageRequest $request, CommunityGroup $group): JsonResponse
     {
-        return $this->ok(['message' => new CommunityMessageResource($this->messages->post($request->user(), $group, $request->validated('body')))], 201);
+        return $this->ok(['message' => new CommunityMessageResource($this->messages->post($request->user(), $group, (string) $request->validated('body'), $request->file('file')))], 201);
+    }
+
+    public function attachment(Request $request, CommunityGroup $group, int $message)
+    {
+        return $this->messages->attachment($request->user(), $group, $message);
     }
 
     public function removeMessage(Request $request, CommunityGroup $group, int $message): JsonResponse

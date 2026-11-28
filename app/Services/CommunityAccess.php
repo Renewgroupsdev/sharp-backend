@@ -6,6 +6,7 @@ use App\Enums\Role;
 use App\Enums\UserStatus;
 use App\Models\CommunityGroup;
 use App\Models\User;
+use App\Support\StudentScope;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Facades\DB;
 
@@ -72,7 +73,7 @@ class CommunityAccess
     public function canView(User $user, CommunityGroup $group): bool
     {
         if ($group->isDm()) {
-            return $this->takesPart($user, $group); // personal chats are private to their two people, staff included
+            return $this->takesPart($user, $group) || $this->isStaff($user) || $this->mentorOverseesDm($user, $group); // two people write in it; staff and the assigned mentor can read it
         }
         if ($this->isStaff($user)) {
             return true; // staff read every group
@@ -82,6 +83,20 @@ class CommunityAccess
         }
 
         return $this->isMember($user, $group);
+    }
+
+    /** A mentor (their assigned students) or an institution (its college's students) may read those students' personal chats (read-only). */
+    public function mentorOverseesDm(User $user, CommunityGroup $group): bool
+    {
+        if (! in_array($user->role, [Role::Mentor, Role::Institution], true) || ! $group->isDm()) {
+            return false;
+        }
+        $ids = $group->members()->pluck('users.id');
+        $students = User::query()->whereIn('id', $ids)->where('role', Role::Student->value);
+
+        return $user->role === Role::Mentor
+            ? $students->whereIn('batch_id', StudentScope::batchIds($user))->exists()
+            : $students->where('college_id', $user->college_id ?? 0)->exists();
     }
 
     /** Pinning a message in a chat: anyone who can open the chat. A pin is personal: only the person who pinned it sees it. */
@@ -110,10 +125,12 @@ class CommunityAccess
     public function visibleTo(User $user): Builder
     {
         $handAdded = DB::table('community_group_members')->where('user_id', $user->id)->select('group_id');
-        $courses = DB::table('batch_course')->where('batch_id', $user->batch_id ?? 0)->select('course_id');
+        $courses = DB::table('batch_course')->where('batch_id', $user->batch_id ?? 0)->select('course_id')
+            ->union(DB::table('student_course')->where('user_id', $user->id)->select('course_id'));
         $inBatch = in_array($user->role->value, self::BATCH_ROLES, true);
 
-        return CommunityGroup::query()->where(fn (Builder $w) => $w
+        // Personal (one-to-one) chats are switched off: they never appear in anyone's list.
+        return CommunityGroup::query()->where('source', '<>', CommunityGroup::DM)->where(fn (Builder $w) => $w
             ->where('source', CommunityGroup::FLOOR)
             ->orWhereIn('id', $handAdded)
             ->orWhere(fn (Builder $own) => $own->where('created_by', $user->id)->where('source', '<>', CommunityGroup::DM))

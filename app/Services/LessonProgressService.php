@@ -45,7 +45,7 @@ class LessonProgressService
     {
         return Course::query()
             ->where('status', CourseStatus::Published->value)
-            ->whereHas('batches', fn (Builder $b) => $b->where('batches.id', $student->batch_id ?? 0));
+            ->forStudent($student);
     }
 
     /** @return array{lessons_total: int, lessons_done: int, progress: int, status: string, last_accessed: ?string} */
@@ -141,7 +141,7 @@ class LessonProgressService
     {
         $student = User::students()->where('public_id', $studentPublicId)->firstOrFail();
         $course = Course::findOrFail($courseId);
-        if (! $course->batches()->whereKey($student->batch_id ?? 0)->exists()) {
+        if (! Course::query()->forStudent($student)->whereKey($course->id)->exists()) {
             throw ValidationException::withMessages(['student_id' => 'This student is not enrolled in the course.']);
         }
 
@@ -152,7 +152,10 @@ class LessonProgressService
             $count = $lessons->filter(fn ($l) => isset($done[$l->id]))->count();
             $pct = $lessons->count() ? (int) round($count / $lessons->count() * 100) : 0;
 
-            return ['name' => $chapter->name, 'done' => $count, 'total' => $lessons->count(), 'pct' => $pct, 'status' => LearningStatus::fromProgress($pct)->value];
+            return [
+                'name' => $chapter->name, 'done' => $count, 'total' => $lessons->count(), 'pct' => $pct, 'status' => LearningStatus::fromProgress($pct)->value,
+                'lessons' => $lessons->map(fn ($l) => ['id' => $l->id, 'name' => $l->name, 'done' => isset($done[$l->id])])->values()->all(),
+            ];
         })->values()->all();
     }
 

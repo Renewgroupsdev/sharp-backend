@@ -74,6 +74,7 @@ class RoleDashboardService
             ]),
             $this->pie('Certificate pipeline', array_map(fn (string $s) => [$s, (int) ($certs[$s] ?? 0)], CertificateStatus::values())),
             $this->bars('Batch fill (enrolled of seats)', $this->batchFill(), '%'),
+            $this->list('Batches ending soon', $this->batchesEnding()),
             $this->list('Starting and ending soon', $this->batchDates()),
             $this->list('Notifications sent today', $this->notificationsToday()),
         ];
@@ -134,14 +135,14 @@ class RoleDashboardService
             'note' => 'Read-only view of how the programme is doing.',
             'kpis' => [
                 ['Active batches', $batchRows->count(), ''],
-                ['Avg attendance', ($this->attendanceRate($studentIds) ?? 0).'%', 'last '.self::WINDOW_DAYS.' days'],
+                ['Avg attendance', ($this->attendanceRate($studentIds) ?? 0).'%', 'of the course days'],
                 ['Avg progress', $this->avgProgress($studentIds).'%', ''],
                 ['Quiz pass rate', $passRate.'%', 'last '.self::WINDOW_DAYS.' days'],
                 ['Courses completed', DB::table('learning_progress')->where('progress', '>=', 100)->count(), ''],
                 ['Community posts', CommonFloorMessage::visible()->where('created_at', '>', now()->subDay())->count(), 'last 24 h'],
             ],
             'blocks' => [
-                $this->bars('Attendance by batch (30 days)', $byBatch->all(), '%'),
+                $this->bars('Course attendance by batch', $byBatch->all(), '%'),
                 $this->progress('Course completion', $this->courseProgress($studentIds, 6)),
                 $this->pie('Quiz results', [['Passed', $quiz['passed']], ['Not passed', $quiz['not_passed']], ['Awaiting marking', $quiz['waiting']]]),
                 $this->list('Batches that need a look', $watch ?: [$this->item('Nothing stands out', '')]),
@@ -209,7 +210,7 @@ class RoleDashboardService
             'note' => $studentIds->isEmpty() ? 'No students to show yet.' : $head['note'],
             'kpis' => [
                 ['Students', $studentIds->count(), "{$batches} ".($batches === 1 ? 'batch' : 'batches')],
-                ['Attendance', ($this->attendanceRate($studentIds) ?? 0).'%', 'last '.self::WINDOW_DAYS.' days'],
+                ['Attendance', ($this->attendanceRate($studentIds) ?? 0).'%', 'of the course days'],
                 ['Avg progress', $this->avgProgress($studentIds).'%', ''],
                 ['Certificates', $issued, "{$pending} waiting"],
                 ['Mentors', $head['mentors'], ''],
@@ -283,6 +284,7 @@ class RoleDashboardService
         $todayRow = DB::table('attendance')->where('student_id', $user->id)->whereDate('att_date', today())->value('status');
         $todayReq = DB::table('attendance_requests')->where('student_id', $user->id)->whereDate('att_date', today())->first();
         $next = $lessons['next'];
+        $month = $this->attendanceMonth($user);
 
         return [
             'title' => 'My learning',
@@ -290,7 +292,6 @@ class RoleDashboardService
             'kpis' => [
                 ['Courses', $courses->count(), 'enrolled'],
                 ['Overall progress', $progress.'%', ''],
-                ['Attendance', ($attendance ?? 0).'%', 'last '.self::WINDOW_DAYS.' days'],
                 ['Due this week', $due->filter(fn ($d) => $d['days'] <= 7)->count(), 'to submit'],
                 ['Certificates', $issued, 'issued'],
                 ['Unread', Notification::where('user_id', $user->id)->whereNull('read_at')->count(), 'notifications'],
@@ -300,9 +301,10 @@ class RoleDashboardService
                     ? $this->item("{$next['course']}: {$next['lesson']}", 'Open', '', "/app/learning/{$next['course_id']}")
                     : $this->item($courses->isEmpty() ? 'No courses yet' : 'You have finished every lesson', '')]),
                 $this->progress('My courses', $courses->map(fn ($c) => [$c->title, (int) $c->progress])->all()),
+                $this->pie('Monthly attendance · '.today()->format('F Y'), [['Present', $month['present']], ['Absent', $month['absent']], ['Pending', $month['pending']]], true),
                 $this->list('Attendance today', [
                     $this->item($todayRow ? "Marked {$todayRow}" : ($todayReq ? "You reported {$todayReq->requested_status}, waiting to be marked" : 'Not reported yet'), $todayRow ? '' : ($todayReq ? 'Pending' : 'Report now'), $todayRow || $todayReq ? ($todayRow ? '' : 'amber') : 'red', '/app/attendance'),
-                    $this->item('Last '.self::WINDOW_DAYS.' days', ($attendance ?? 0).'%'),
+                    $this->item('Course attendance', ($attendance ?? 0).'%'),
                 ]),
                 $this->list('Due soon', $due->take(5)->map(fn ($d) => $this->item($d['title'], $d['label'], $d['days'] <= 3 ? 'red' : ($d['days'] <= 7 ? 'amber' : ''), '/app/assessments'))->values()->all() ?: [$this->item('Nothing due', '')]),
                 $this->progress('Certificate eligibility', [
@@ -317,9 +319,25 @@ class RoleDashboardService
 
     /* ------------------------------------------------------------- building */
 
-    private function pie(string $title, array $slices): array
+    /**
+     * This month so far: days attended, days marked absent, and the working days with no mark yet (pending).
+     *
+     * @return array{present: int, absent: int, pending: int}
+     */
+    private function attendanceMonth(User $user): array
     {
-        return ['type' => 'pie', 'title' => $title, 'slices' => array_map(fn ($s) => ['label' => $s[0], 'value' => (int) $s[1]], $slices)];
+        $from = today()->startOfMonth();
+        $rows = DB::table('attendance')->where('student_id', $user->id)->whereDate('att_date', '>=', $from->toDateString())->whereDate('att_date', '<=', today()->toDateString())->get(['att_date', 'status']);
+        $present = $rows->filter(fn ($r) => $r->status !== AttendanceStatus::Absent->value)->pluck('att_date')->map(fn ($d) => substr((string) $d, 0, 10))->unique()->count();
+        $absent = $rows->filter(fn ($r) => $r->status === AttendanceStatus::Absent->value)->pluck('att_date')->map(fn ($d) => substr((string) $d, 0, 10))->unique()->count();
+        $working = AttendanceSummary::workingDays($from, today());
+
+        return ['present' => $present, 'absent' => $absent, 'pending' => max(0, $working - $present - $absent)];
+    }
+
+    private function pie(string $title, array $slices, bool $threeD = false): array
+    {
+        return ['type' => 'pie', 'title' => $title, 'three_d' => $threeD, 'slices' => array_map(fn ($s) => ['label' => $s[0], 'value' => (int) $s[1]], $slices)];
     }
 
     private function bars(string $title, array $items, string $unit = ''): array
@@ -356,10 +374,10 @@ class RoleDashboardService
         if ($studentIds->isEmpty()) {
             return null;
         }
-        $row = DB::table('attendance')->whereIn('student_id', $studentIds)->where('att_date', '>=', today()->subDays($days - 1))
-            ->selectRaw('COUNT(*) AS total, SUM(CASE WHEN status IN (?, ?) THEN 1 ELSE 0 END) AS ok', [AttendanceStatus::Present->value, AttendanceStatus::Manual->value])->first();
+        // The average course attendance: each student's days attended out of the working days of their course (batch) dates.
+        $rates = collect(app(AttendanceSummary::class)->ratesFor($studentIds));
 
-        return $row && $row->total ? $this->pct((int) $row->ok, (int) $row->total) : null;
+        return $rates->isEmpty() ? null : (int) round($rates->avg());
     }
 
     /** @return array{present: int, absent: int, not_marked: int} */
@@ -391,13 +409,12 @@ class RoleDashboardService
         if ($studentIds->isEmpty()) {
             return collect();
         }
-        $att = DB::table('attendance')->whereIn('student_id', $studentIds)->where('att_date', '>=', today()->subDays(self::WINDOW_DAYS - 1))->groupBy('student_id')
-            ->selectRaw('student_id, COUNT(*) AS total, SUM(CASE WHEN status IN (?, ?) THEN 1 ELSE 0 END) AS ok', [AttendanceStatus::Present->value, AttendanceStatus::Manual->value])->get()->keyBy('student_id');
+        $att = app(AttendanceSummary::class)->ratesFor($studentIds);
         $prog = DB::table('learning_progress')->whereIn('user_id', $studentIds)->groupBy('user_id')->selectRaw('user_id, AVG(progress) AS p')->pluck('p', 'user_id');
 
         return User::whereIn('id', $studentIds)->orderBy('name')->get(['id', 'name'])->map(fn (User $u) => [
             'id' => $u->id, 'name' => $u->name,
-            'att' => isset($att[$u->id]) && $att[$u->id]->total ? $this->pct((int) $att[$u->id]->ok, (int) $att[$u->id]->total) : null,
+            'att' => $att[$u->id] ?? null,
             'progress' => (int) round((float) ($prog[$u->id] ?? 0)),
         ]);
     }
@@ -456,6 +473,23 @@ class RoleDashboardService
     {
         return Batch::where('status', '<>', 'closed')->where('seats', '>', 0)->orderBy('name')->limit(6)->get()
             ->map(fn (Batch $b) => [$b->name, $this->pct(User::students()->where('batch_id', $b->id)->count(), (int) $b->seats)])->all();
+    }
+
+    /** Batches that end within 14 days (or ended and are still open), nearest first; red inside a week. @return list<array<string, mixed>> */
+    private function batchesEnding(): array
+    {
+        // Open batches up to 14 days from their end (or past it), and closed ones for 30 days after they ended.
+        $rows = Batch::query()->whereDate('end_date', '<=', today()->addDays(14))
+            ->where(fn ($q) => $q->where('status', '<>', 'closed')->orWhereDate('end_date', '>=', today()->subDays(30)))
+            ->orderBy('end_date')->limit(8)->get()
+            ->map(function (Batch $b) {
+                $days = (int) today()->diffInDays($b->end_date, false);
+                $when = $days < 0 ? ($days === -1 ? 'ended yesterday' : 'ended '.abs($days).' days ago') : ($days === 0 ? 'ends today' : ($days === 1 ? 'ends tomorrow' : "ends in {$days} days"));
+
+                return $this->item("{$b->name} · {$b->end_date->format('d M Y')}", $when, $days <= 7 ? 'red' : 'amber', '/app/institutes/batches');
+            })->all();
+
+        return $rows ?: [$this->item('No batch ends in the next 14 days', '')];
     }
 
     /** @return list<array<string, mixed>> */

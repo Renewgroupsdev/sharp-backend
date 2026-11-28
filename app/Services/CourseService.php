@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Support\StudentScope;
 use App\Enums\CourseStatus;
 use App\Enums\Role;
 use App\Models\Course;
@@ -35,7 +36,12 @@ class CourseService
         return Course::query()
             ->with(['category:id,name', 'batches:id,name', 'chapters.lessons'])
             ->when($staff && ! empty($filters['trashed']), fn (Builder $q) => $q->onlyTrashed())
+            ->when(! $staff && ! empty($filters['trashed']), fn (Builder $q) => $q->whereRaw('1 = 0')) // the trash is for staff
             ->when(! $staff, fn (Builder $q) => $q->where('status', CourseStatus::Published->value))
+            // An institution sees the courses its own students are enrolled in.
+            ->when($actor->role === Role::Institution, fn (Builder $q) => $q->whereIn('id', StudentScope::collegeCourseIds($actor)))
+            // A mentor sees the courses they teach.
+            ->when($actor->role === Role::Mentor, fn (Builder $q) => $q->whereIn('id', StudentScope::courseIds($actor)))
             ->when($staff && ! empty($filters['status']), fn (Builder $q) => $q->where('status', $filters['status']))
             ->when(! empty($filters['category_id']), fn (Builder $q) => $q->where('course_category_id', $filters['category_id']))
             ->search($filters['q'] ?? null)

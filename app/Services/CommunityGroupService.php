@@ -8,6 +8,8 @@ use App\Models\Course;
 use App\Models\CommunityGroup;
 use App\Models\CommunityMessage;
 use App\Models\User;
+use App\Enums\Role;
+use App\Support\StudentScope;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
@@ -67,11 +69,18 @@ class CommunityGroupService
         return $this->decorate($actor, $groups);
     }
 
-    /** A person's own personal chats. They are private: staff do not see other people's. */
+    /** A person's own personal chats; Super Admin, Admin and OB see every personal chat (read-only for the ones they are not in). */
     public function dms(User $actor): Collection
     {
-        $dms = $this->access->visibleTo($actor)
-            ->where('source', CommunityGroup::DM)->with(['members:id,public_id,name', 'creator:id,name'])->latest('id')->get();
+        // Personal chats are switched off for everyone.
+        return $this->decorate($actor, new Collection);
+
+        $dms = ($this->access->isStaff($actor) ? CommunityGroup::query() : $this->access->visibleTo($actor))
+            ->where('source', CommunityGroup::DM)
+            ->when($actor->role === Role::Mentor, fn (Builder $q) => $q->orWhere(fn (Builder $o) => $o->where('source', CommunityGroup::DM)
+                ->whereHas('members', fn (Builder $m) => $m->where('users.role', Role::Student->value)->whereIn('users.batch_id', StudentScope::batchIds($actor)))))
+            ->when($actor->role === Role::Institution, fn (Builder $q) => $q->orWhere(fn (Builder $o) => $o->where('source', CommunityGroup::DM)
+                ->whereHas('members', fn (Builder $m) => $m->where('users.role', Role::Student->value)->where('users.college_id', $actor->college_id ?? 0))))->with(['members:id,public_id,name', 'creator:id,name'])->latest('id')->get();
 
         return $this->decorate($actor, $dms);
     }
@@ -195,6 +204,8 @@ class CommunityGroupService
     /** One personal chat per pair of people; an existing one is reused. */
     public function openDm(User $actor, string $otherPublicId): CommunityGroup
     {
+        throw ValidationException::withMessages(['user' => 'Personal messages are turned off.']);
+
         $other = User::query()->where('public_id', $otherPublicId)->where('status', '<>', UserStatus::Suspended->value)->firstOrFail();
         if ($other->id === $actor->id) {
             throw ValidationException::withMessages(['user' => 'Choose someone else to message.']);

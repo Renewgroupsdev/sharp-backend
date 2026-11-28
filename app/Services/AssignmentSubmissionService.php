@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Support\StudentScope;
 use App\Enums\AssessmentStatus;
 use App\Enums\AssessmentType;
 use App\Enums\Role;
@@ -53,6 +54,9 @@ class AssignmentSubmissionService
                 if ($latest && $latest->status === SubmissionStatus::UnderReview) {
                     throw ValidationException::withMessages(['submission' => 'Your submission is currently under review.']);
                 }
+                if ($latest && $latest->status === SubmissionStatus::Graded) {
+                    throw ValidationException::withMessages(['submission' => 'This assignment has been graded, so no new version can be submitted.']);
+                }
                 $number = (int) ($latest?->submission_no ?? 0) + 1;
                 $submission = AssessmentSubmission::create([
                     'assessment_id' => $assessment->id,
@@ -103,6 +107,21 @@ class AssignmentSubmissionService
         return $submission->fresh(['assessment:id,title,course,max_marks', 'student:id,public_id,name,batch_id', 'attachments', 'grader:id,name']);
     }
 
+    /** A student takes back one of their own versions: only while it is still waiting (submitted or returned) and before the deadline. */
+    public function removeOwn(User $student, AssessmentSubmission $submission): void
+    {
+        abort_unless($submission->student_id === $student->id, 404, 'Submission not found.');
+        $submission->loadMissing('assessment');
+        if (! in_array($submission->status, [SubmissionStatus::Submitted, SubmissionStatus::Returned], true)) {
+            throw ValidationException::withMessages(['submission' => 'This version is already being reviewed or graded and cannot be deleted.']);
+        }
+        $due = $submission->assessment?->due_date;
+        if ($due && now()->gt($due->copy()->endOfDay())) {
+            throw ValidationException::withMessages(['submission' => 'The submission deadline has passed.']);
+        }
+        $this->remove($student, $submission);
+    }
+
     /** Admin removal of a submission at any status; its files are deleted from storage too. */
     public function remove(User $actor, AssessmentSubmission $submission): void
     {
@@ -123,7 +142,7 @@ class AssignmentSubmissionService
         return AssessmentSubmission::query()
             ->with(['assessment:id,type,title,course,due_date,max_marks', 'student:id,public_id,name,batch_id', 'attachments', 'grader:id,name'])
             ->whereHas('assessment', fn ($q) => $q->where('type', AssessmentType::Assignment->value))
-            ->when($actor->role === Role::Mentor, fn ($q) => $q->whereHas('student', fn ($s) => $s->where('batch_id', $actor->batch_id ?? 0)))
+            ->when($actor->role === Role::Mentor, fn ($q) => $q->whereHas('student', fn ($s) => $s->whereIn('batch_id', StudentScope::batchIds($actor))))
             ->when($filters['assessment_id'] ?? null, fn ($q, $id) => $q->where('assessment_id', $id))
             ->when($filters['status'] ?? null, fn ($q, $status) => $q->where('status', $status))
             ->when($filters['q'] ?? null, fn ($q, $term) => $q->whereHas('student', fn ($s) => $s->where('name', 'ilike', "%{$term}%")->orWhere('public_id', 'ilike', "%{$term}%")))
@@ -133,7 +152,7 @@ class AssignmentSubmissionService
     public function markUnderReview(User $actor, AssessmentSubmission $submission): AssessmentSubmission
     {
         $submission->loadMissing(['student', 'assessment']);
-        abort_if($actor->role === Role::Mentor && $submission->student->batch_id !== $actor->batch_id, 403, 'You can only review students in your own batch.');
+        abort_if($actor->role === Role::Mentor && ! StudentScope::ownsBatch($actor, $submission->student->batch_id), 403, 'You can only review your assigned students.');
         abort_if($submission->status === SubmissionStatus::Graded, 422, 'A graded submission cannot be moved back to review.');
         $submission->update(['status' => SubmissionStatus::UnderReview]);
         $this->audit->record($actor, 'Started assignment review', (string) $submission->id, $submission->assessment?->title);
@@ -144,7 +163,7 @@ class AssignmentSubmissionService
     public function grade(User $actor, AssessmentSubmission $submission, array $data): AssessmentSubmission
     {
         $submission->loadMissing(['assessment', 'student']);
-        abort_if($actor->role === Role::Mentor && $submission->student->batch_id !== $actor->batch_id, 403, 'You can only evaluate students in your own batch.');
+        abort_if($actor->role === Role::Mentor && ! StudentScope::ownsBatch($actor, $submission->student->batch_id), 403, 'You can only evaluate your assigned students.');
         abort_unless(($submission->assessment->type?->value ?? $submission->assessment->type) === AssessmentType::Assignment->value, 422);
         abort_if($submission->status === SubmissionStatus::Graded, 422, 'This submission has already been graded.');
 

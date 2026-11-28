@@ -18,6 +18,7 @@ class CommunityMessageResource extends JsonResource
             'group' => $this->resource['group'],
             'body' => $this->resource['body'],
             'at' => $this->resource['at'],
+            'attachment' => $this->resource['attachment'] ?? null,
             'author' => $author ? [
                 'user_id' => $author->public_id,
                 'name' => $author->name,

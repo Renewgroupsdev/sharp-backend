@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Support\StudentScope;
 use App\Enums\AttendanceChoice;
 use App\Enums\AttendanceRequestStatus;
 use App\Enums\AttendanceStatus;
@@ -39,7 +40,7 @@ class AttendanceRequestService
         return AttendanceRequest::query()
             ->with(self::WITH)
             ->when($actor->role === Role::Student, fn (Builder $q) => $q->where('student_id', $actor->id))
-            ->when($actor->role === Role::Mentor, fn (Builder $q) => $q->whereHas('student', fn (Builder $s) => $s->where('batch_id', $actor->batch_id ?? 0)))
+            ->when($actor->role === Role::Mentor, fn (Builder $q) => $q->whereHas('student', fn (Builder $s) => $s->whereIn('batch_id', StudentScope::batchIds($actor))))
             ->when(! empty($filters['status']), fn (Builder $q) => $q->where('status', $filters['status']))
             ->when(! empty($filters['requested_status']), fn (Builder $q) => $q->where('requested_status', $filters['requested_status']))
             ->when(! empty($filters['date']), fn (Builder $q) => $q->whereDate('att_date', $filters['date']))
@@ -91,7 +92,7 @@ class AttendanceRequestService
             $request = AttendanceRequest::whereKey($request->id)->lockForUpdate()->firstOrFail();
             $student = $request->student;
 
-            abort_if($actor->role === Role::Mentor && $student->batch_id !== $actor->batch_id, 403, 'You can only mark students of your own batch.');
+            abort_if($actor->role === Role::Mentor && ! StudentScope::ownsBatch($actor, $student->batch_id), 403, 'You can only mark your assigned students.');
 
             [$status, $reason] = match (true) {
                 $decision === AttendanceChoice::Absent => [AttendanceStatus::Absent, $note ?: $request->reason ?: "Marked absent by {$actor->name}"],

@@ -60,6 +60,12 @@ final class NotificationCatalog
             'body' => '{student} ({batch}) reported {status} for {date}.{reason}',
             'vars' => ['student', 'batch', 'status', 'date', 'reason'],
         ],
+        'batch_ending' => [
+            'label' => 'Batch end date is near', 'audience' => 'Super Admin, Admin, OB', 'type' => 'batch',
+            'title' => '{batch} {when}',
+            'body' => 'Batch {batch} ends on {date}. Review attendance, certificates and results before it closes.',
+            'vars' => ['batch', 'when', 'date'],
+        ],
         'attendance_pending' => [
             'label' => 'Students with attendance still pending today', 'audience' => 'Super Admin, Admin, OB, batch Mentor', 'type' => 'attendance',
             'title' => '{count} attendance pending',
@@ -131,6 +137,12 @@ final class NotificationCatalog
             'title' => 'You were added to {group}',
             'body' => '{actor} added you to the {kind} group {group}.',
             'vars' => ['group', 'kind', 'actor'],
+        ],
+        'chat_mention' => [
+            'label' => 'Mentioned in a chat', 'audience' => 'The person mentioned with @', 'type' => 'community',
+            'title' => '{author} mentioned you in {group}',
+            'body' => '{message}',
+            'vars' => ['group', 'author', 'message'],
         ],
         'announcement_posted' => [
             'label' => 'Announcement posted', 'audience' => 'Members of the announcement group', 'type' => 'community',

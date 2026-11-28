@@ -15,9 +15,9 @@ class BatchController extends ApiController
 {
     public function __construct(private readonly BatchService $batches) {}
 
-    public function index(): JsonResponse
+    public function index(Request $request): JsonResponse
     {
-        return $this->ok(['batches' => BatchResource::collection($this->batches->list())]);
+        return $this->ok(['batches' => BatchResource::collection($this->batches->list($request->user()))]);
     }
 
     public function store(StoreBatchRequest $request): JsonResponse

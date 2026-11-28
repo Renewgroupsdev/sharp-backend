@@ -13,8 +13,8 @@ use Illuminate\Support\Str;
 
 /**
  * The certificate QR codes: one per student per enrolled course (a student is enrolled in every course of their batch). The QR
- * holds a random token; what a scan shows depends on how the course stands: completed (100%) shows the certificate, whether
- * or not the office has issued its number yet; a cancelled certificate says so; anything else says the course is not completed.
+ * holds a random token; what a scan shows depends on how the course stands: completed (100%) but not yet verified by the programme
+ * office says so; a cancelled certificate says so; anything else says the course is not completed. Only an issued certificate is shown.
  */
 class CertificateQrService
 {
@@ -26,7 +26,7 @@ class CertificateQrService
     public function forStudent(User $student): array
     {
         $courses = Course::query()
-            ->whereIn('id', DB::table('batch_course')->where('batch_id', $student->batch_id ?? 0)->select('course_id'))
+            ->forStudent($student)
             ->orderBy('title')->get(['id', 'title']);
         if ($courses->isEmpty()) {
             return [];
@@ -90,22 +90,8 @@ class CertificateQrService
                 'design' => $cert->design,
             ];
         } elseif ($standing['status'] === 'completed') {
-            // Finished the course (100%): show the certificate now, with the programme's current design. Its number comes when the office issues it.
-            $pending = Certificate::query()->where(['user_id' => $student->id, 'course_id' => $course->id])->orderByDesc('id')->first();
-            $score = DB::table('quiz_results as q')->join('assessments as a', 'a.id', '=', 'q.assessment_id')
-                ->where('q.student_id', $student->id)->where('a.course', $course->title)->selectRaw('ROUND(AVG(q.result_percent)) AS pct')->value('pct');
-            $done = DB::table('learning_progress')->where(['user_id' => $student->id, 'course_id' => $course->id])->value('updated_at');
+            // Finished the course (100%) but the programme office has not verified and issued the certificate yet: nothing to show.
             $out['official'] = false;
-            $out['certificate'] = [
-                'name' => $student->name,
-                'course' => $course->title,
-                'score' => $pending?->score_override ?? ($score !== null ? (int) $score : null),
-                'number' => null,
-                'issued_at' => null,
-                'issue_date' => $pending?->issue_date?->toDateString() ?? ($done ? substr((string) $done, 0, 10) : now()->toDateString()),
-                'photo' => AvatarStore::url($student->avatar_url),
-                'design' => array_merge(CertificateSetting::current()->design(), $pending?->design_override ?? []),
-            ];
         } elseif ($standing['status'] === 'cancelled' && $cert) {
             $out['cancelled_at'] = $cert->cancelled_at;
         }

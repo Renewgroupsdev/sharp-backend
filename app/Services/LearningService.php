@@ -6,6 +6,7 @@ use App\Enums\LearningStatus;
 use App\Enums\Role;
 use App\Models\LearningProgress;
 use App\Models\User;
+use App\Support\StudentScope;
 use Illuminate\Database\Query\Builder;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
@@ -21,9 +22,12 @@ class LearningService
      */
     private function query(): Builder
     {
-        return DB::table('batch_course as bc')
+        $pairs = DB::table('batch_course as bc')->join('users as bu', fn ($j) => $j->on('bu.batch_id', '=', 'bc.batch_id')->where('bu.role', Role::Student->value))->select('bu.id as user_id', 'bc.course_id')
+            ->union(DB::table('student_course')->select('user_id', 'course_id'));
+
+        return DB::query()->fromSub($pairs, 'bc')
             ->join('courses as c', fn ($j) => $j->on('c.id', '=', 'bc.course_id')->whereNull('c.deleted_at'))
-            ->join('users as u', fn ($j) => $j->on('u.batch_id', '=', 'bc.batch_id')->where('u.role', Role::Student->value))
+            ->join('users as u', fn ($j) => $j->on('u.id', '=', 'bc.user_id')->where('u.role', Role::Student->value))
             ->leftJoin('learning_progress as lp', fn ($j) => $j->on('lp.user_id', '=', 'u.id')->on('lp.course_id', '=', 'c.id'))
             ->select([
                 'u.id as user_id', 'u.public_id as student_id', 'u.name', 'u.org',
@@ -39,11 +43,14 @@ class LearningService
      * @param  array{q?: string, course_id?: int, org?: string, status?: string}  $filters
      * @return Collection<int, object>
      */
-    public function list(array $filters = []): Collection
+    public function list(array $filters = [], ?User $actor = null): Collection
     {
         $status = ! empty($filters['status']) ? LearningStatus::from($filters['status']) : null;
 
+        $ids = $actor ? StudentScope::studentIds($actor) : null;
+
         return $this->query()
+            ->when($ids, fn (Builder $q) => $q->whereIn('u.id', $ids))
             ->when(! empty($filters['q']), fn (Builder $q) => $q->where(fn (Builder $w) => $w
                 ->whereLike('u.name', "%{$filters['q']}%")->orWhereLike('u.public_id', "%{$filters['q']}%")))
             ->when(! empty($filters['course_id']), fn (Builder $q) => $q->where('c.id', $filters['course_id']))

@@ -9,6 +9,7 @@ use App\Http\Requests\StoreCourseRequest;
 use App\Http\Requests\SyncCourseChaptersRequest;
 use App\Http\Resources\CourseResource;
 use App\Models\Course;
+use App\Support\StudentScope;
 use App\Services\CourseService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -54,6 +55,7 @@ class CourseController extends ApiController
 
     public function chapters(SyncCourseChaptersRequest $request, Course $course): JsonResponse
     {
+        abort_if($request->user()->role === Role::Mentor && ! StudentScope::courseIds($request->user())->where('c.id', $course->id)->exists(), 403, 'You can only edit the courses you teach.');
         $course = $this->courses->replaceChapters($request->user(), $course, $request->validated('chapters'));
 
         return $this->ok(['course' => new CourseResource($course)]);
